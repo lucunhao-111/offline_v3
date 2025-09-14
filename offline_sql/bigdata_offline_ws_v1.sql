@@ -1,1 +1,0 @@
-select * from ods_activity_info;
