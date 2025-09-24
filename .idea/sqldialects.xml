@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="SqlDialectMappings">
+    <file url="file://F:/专高六(2)/sql脚本/activity_rule.sql" dialect="MySQL" />
+    <file url="file://F:/专高六(2)/sql脚本/mysql_to_hive212_test_ddl.sql" dialect="MySQL" />
+  </component>
+</project>
