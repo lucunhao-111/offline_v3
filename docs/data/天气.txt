@@ -1,0 +1,359 @@
+import requests
+from bs4 import BeautifulSoup
+import time
+import hashlib
+import json
+import re
+import os
+from datetime import datetime
+
+# 城市代码映射（可以从页面获取或手动定义）
+CITY_CODES = {
+    "北京": "54511",
+    "上海": "58367",
+    "广州": "59287",
+    "深圳": "59493",
+    "杭州": "58457",
+    "南京": "58238",
+    "成都": "56294",
+    "武汉": "57494",
+    "西安": "57036",
+    "重庆": "57516"
+}
+
+# 或者从页面动态获取城市列表
+BASE_URL = "https://weather.cma.cn/web/weather/{}.html"
+DATA_DIR = "weather_data"
+history_weather_data = {}
+
+def ensure_data_directory():
+    """确保数据目录存在"""
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+        print(f"📁 创建数据目录: {DATA_DIR}")
+    return DATA_DIR
+
+def get_city_list():
+    """从页面获取城市列表"""
+    print("🔄 正在获取城市列表...")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    try:
+        # 访问主页获取城市列表
+        main_url = "https://weather.cma.cn/web/weather/58367.html"  # 上海作为入口
+        response = requests.get(main_url, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        cities = {}
+
+        # 方法1: 从下拉菜单获取城市
+        select_elements = soup.find_all("select")
+        for select in select_elements:
+            options = select.find_all("option")
+            for option in options:
+                city_name = option.get_text(strip=True)
+                city_value = option.get('value', '')
+                if city_name and city_name not in ['请选择', '城市'] and len(city_name) <= 4:
+                    # 提取城市代码
+                    code_match = re.search(r'/(\d+)\.html', city_value)
+                    if code_match:
+                        cities[city_name] = code_match.group(1)
+
+        # 如果没找到，使用预定义的城市列表
+        if not cities:
+            print("⚠️ 无法从页面获取城市列表，使用预定义列表")
+            return CITY_CODES
+
+        print(f"✅ 找到 {len(cities)} 个城市")
+        return cities
+
+    except Exception as e:
+        print(f"❌ 获取城市列表失败: {e}")
+        print("⚠️ 使用预定义城市列表")
+        return CITY_CODES
+
+def get_weather_data(city_code, city_name):
+    """获取指定城市的天气数据"""
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    }
+
+    try:
+        city_url = BASE_URL.format(city_code)
+        response = requests.get(city_url, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # 解析7天天气预报
+        forecast_list = parse_7day_forecast(soup)
+
+        # 解析实时天气信息
+        realtime_data = parse_realtime_weather(soup)
+
+        current_data = {
+            "location": {
+                "city": city_name,
+                "city_code": city_code
+            },
+            "realtime": realtime_data,
+            "forecast_7d": forecast_list,
+            "update_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "source": city_url
+        }
+
+        print(f"✅ 获取 {city_name} 数据成功 - 温度: {realtime_data.get('temp', 'N/A')}")
+        return current_data
+
+    except Exception as e:
+        print(f"❌ 获取 {city_name} 气象数据失败：{str(e)}")
+        return None
+
+def parse_7day_forecast(soup):
+    """解析7天天气预报"""
+    forecast_list = []
+
+    days_container = soup.find("div", class_="row hb days")
+    if not days_container:
+        return []
+
+    day_divs = days_container.find_all("div", class_=re.compile(r"pull-left day"))
+
+    for day_div in day_divs:
+        try:
+            date_text = day_div.get_text(strip=True)
+
+            date_match = re.search(r'([周一二三四五六日]+)(\d{2}/\d{2})', date_text)
+            date_str = date_match.group(0) if date_match else "未知日期"
+
+            weather_match = re.search(r'([多云晴阴雨雪暴雾沙尘雷]+)', date_text)
+            weather_str = weather_match.group(1) if weather_match else "未知"
+
+            wind_match = re.search(r'([东南西北]+风)', date_text)
+            wind_str = wind_match.group(1) if wind_match else "未知"
+
+            wind_level_match = re.search(r'(微风|轻风|强风|\d+-\d+级风?)', date_text)
+            wind_level = wind_level_match.group(1) if wind_level_match else "未知"
+
+            temp_matches = re.findall(r'(\d+)℃', date_text)
+            if len(temp_matches) >= 2:
+                high_temp = f"{temp_matches[0]}℃"
+                low_temp = f"{temp_matches[1]}℃"
+                temp_range = f"{low_temp}~{high_temp}"
+            else:
+                temp_range = "未知"
+                high_temp = "未知"
+                low_temp = "未知"
+
+            forecast_list.append({
+                "date": date_str,
+                "weather": weather_str,
+                "wind_direction": wind_str,
+                "wind_level": wind_level,
+                "temp_range": temp_range,
+                "high_temp": high_temp,
+                "low_temp": low_temp
+            })
+
+        except Exception as e:
+            continue
+
+    return forecast_list
+
+def parse_realtime_weather(soup):
+    """解析实时天气信息"""
+    realtime_data = {}
+
+    active_day = soup.find("div", class_="pull-left day actived")
+    if active_day:
+        active_text = active_day.get_text(strip=True)
+
+        temp_matches = re.findall(r'(\d+)℃', active_text)
+        if temp_matches:
+            realtime_data['temp'] = f"{temp_matches[0]}℃"
+
+        weather_match = re.search(r'([多云晴阴雨雪暴雾沙尘雷]+)', active_text)
+        if weather_match:
+            realtime_data['weather'] = weather_match.group(1)
+
+        wind_match = re.search(r'([东南西北]+风)', active_text)
+        if wind_match:
+            realtime_data['wind_direction'] = wind_match.group(1)
+
+        wind_level_match = re.search(r'(微风|轻风|强风|\d+-\d+级风?)', active_text)
+        if wind_level_match:
+            realtime_data['wind_level'] = wind_level_match.group(1)
+        else:
+            realtime_data['wind_level'] = "未知"
+
+    page_text = soup.get_text()
+
+    humidity_match = re.search(r'湿度\s*(\d+)%?', page_text)
+    realtime_data['humidity'] = f"{humidity_match.group(1)}%" if humidity_match else "未知"
+
+    pressure_match = re.search(r'气压\s*(\d+)\s*(h?Pa?)', page_text, re.IGNORECASE)
+    realtime_data['pressure'] = f"{pressure_match.group(1)}{pressure_match.group(2)}" if pressure_match else "未知"
+
+    if 'temp' not in realtime_data:
+        temp_matches = re.findall(r'(\d+\s*℃)', page_text)
+        realtime_data['temp'] = temp_matches[0] if temp_matches else "未知"
+
+    return realtime_data
+
+def is_weather_data_changed(new_data, old_data, city_name):
+    """判断天气数据是否真正发生变化"""
+    if city_name not in old_data:
+        return True
+    if new_data is None:
+        return False
+
+    try:
+        new_copy = new_data.copy()
+        old_copy = old_data[city_name].copy()
+
+        new_copy.pop('update_time', None)
+        old_copy.pop('update_time', None)
+
+        new_hash = hashlib.md5(json.dumps(new_copy, sort_keys=True).encode()).hexdigest()
+        old_hash = hashlib.md5(json.dumps(old_copy, sort_keys=True).encode()).hexdigest()
+
+        return new_hash != old_hash
+
+    except Exception as e:
+        print(f"比较数据时出错: {e}")
+        return True
+
+def save_weather_data(data):
+    """保存数据到指定目录"""
+    if data:
+        try:
+            data_dir = ensure_data_directory()
+
+            city_name = data['location'].get('city', '未知地区')
+            safe_city_name = re.sub(r'[\\/*?:"<>|]', '', city_name)
+
+            current_time = datetime.now()
+            date_str = current_time.strftime("%Y%m%d")
+            time_str = current_time.strftime("%H%M%S")
+
+            filename = f"weather_{safe_city_name}_{date_str}_{time_str}.json"
+            filepath = os.path.join(data_dir, filename)
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            print(f"💾 {city_name} 数据已保存: {filename}")
+            print(f"📊 实时温度: {data['realtime'].get('temp', '未知')}, 天气: {data['realtime'].get('weather', '未知')}")
+
+            return filepath
+
+        except Exception as e:
+            print(f"❌ 保存失败: {str(e)}")
+            return None
+
+def cleanup_old_files(max_files_per_city=20):
+    """清理旧文件，每个城市保留最新的文件"""
+    try:
+        data_dir = ensure_data_directory()
+        files = [f for f in os.listdir(data_dir) if f.endswith('.json')]
+
+        # 按城市分组
+        city_files = {}
+        for f in files:
+            city_match = re.search(r'weather_([^_]+)_', f)
+            if city_match:
+                city = city_match.group(1)
+                if city not in city_files:
+                    city_files[city] = []
+                filepath = os.path.join(data_dir, f)
+                mtime = os.path.getmtime(filepath)
+                city_files[city].append((mtime, filepath))
+
+        # 对每个城市清理旧文件
+        for city, file_list in city_files.items():
+            if len(file_list) > max_files_per_city:
+                file_list.sort(reverse=True)  # 按时间倒序，最新的在前面
+                files_to_delete = file_list[max_files_per_city:]
+                for mtime, filepath in files_to_delete:
+                    os.remove(filepath)
+                    print(f"🗑️  清理 {city} 的旧文件: {os.path.basename(filepath)}")
+
+    except Exception as e:
+        print(f"清理文件时出错: {e}")
+
+def main():
+    """主函数 - 城市遍历版本"""
+    print("🌤️  开始多城市气象数据监控...")
+    data_dir = ensure_data_directory()
+    print(f"数据保存目录: {os.path.abspath(data_dir)}")
+
+    # 获取城市列表
+    cities = get_city_list()
+    print(f"🎯 监控城市列表: {', '.join(cities.keys())}")
+
+    print("\n🔄 开始城市遍历循环...")
+    cycle_count = 0
+    forward = True  # 控制遍历方向
+
+    while True:
+        try:
+            cycle_count += 1
+            print(f"\n{'='*50}")
+            print(f"🚀 第{cycle_count}轮遍历 ({'正序' if forward else '倒序'})")
+            print(f"⏰ 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*50}")
+
+            # 根据遍历方向确定城市顺序
+            city_items = list(cities.items())
+            if not forward:
+                city_items.reverse()
+
+            for city_name, city_code in city_items:
+                print(f"\n📍 正在获取 {city_name} 的天气数据...")
+
+                current_weather = get_weather_data(city_code, city_name)
+
+                if current_weather:
+                    if is_weather_data_changed(current_weather, history_weather_data, city_name):
+                        filepath = save_weather_data(current_weather)
+                        if filepath:
+                            history_weather_data[city_name] = current_weather
+                            print(f"🔄 {city_name} 数据已更新")
+                        else:
+                            print(f"⚠️  {city_name} 数据有变化但保存失败")
+                    else:
+                        print(f"⏸️  {city_name} 数据无变化")
+                else:
+                    print(f"❌ 获取 {city_name} 数据失败")
+
+                # 城市间间隔2秒，避免请求过快
+                time.sleep(2)
+
+            # 切换遍历方向
+            forward = not forward
+
+            print(f"\n✅ 第{cycle_count}轮遍历完成")
+            print(f"⏰ 完成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"⏳ 等待10秒后开始下一轮...")
+
+            # 每5轮清理一次文件
+            if cycle_count % 5 == 0:
+                cleanup_old_files(max_files_per_city=10)
+
+            time.sleep(10)
+
+        except KeyboardInterrupt:
+            print("\n\n👋 用户中断程序")
+            break
+        except Exception as e:
+            print(f"❌ 监控循环出错: {e}")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    main()
